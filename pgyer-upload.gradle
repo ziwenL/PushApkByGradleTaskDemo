@@ -1,0 +1,186 @@
+import groovy.json.JsonSlurper
+
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.text.SimpleDateFormat
+import java.util.concurrent.TimeUnit
+
+ext.uploadApk = this.&uploadApk
+
+/**
+ * Sept 1 创建脚本
+ */
+
+/**
+ * 蒲公英 ApiKey
+ * 个人 ：0fec02a2fd7c9185f10182b6299b9ec6
+ */
+static String getApiKey() {
+    return "0fec02a2fd7c9185f10182b6299b9ec6"
+}
+
+/**
+ * 上传 apk 到蒲公英
+ * @apk 安装包文件
+ * @flavorName 渠道名
+ */
+def uploadApk(File apk, String flavorName) {
+    if (apk == null) {
+        throw new RuntimeException("apk file not exists!")
+    }
+    def apkName = apk.name
+    println "*************** Upload Init ***************"
+    //渠道信息
+    String buildFlavorName = flavorName
+    if (flavorName == "DemoRelease") {
+        buildFlavorName = "Test"
+    } else if (flavorName == "DevRelease") {
+        buildFlavorName = "Dev"
+    } else if (flavorName == "ProduceRelease") {
+        buildFlavorName = "Produce"
+    }else  if (flavorName == "BetaRelease"){
+        buildFlavorName = "Beta"
+    }
+    println "flavorName = ${buildFlavorName}  apkName = ${apkName}  apkSize = ${apk.size()}"
+    // Git 提交信息
+    String commitLogStr = getGitCommitLogByCount(5)
+//    String commitLogStr = getGitCommitLogByToDay()
+    //更新信息
+    String updateDescription = "\n[${getBranchName()}]：${buildFlavorName}-${rootProject.ext.app.versionName}-${rootProject.ext.app.versionCode}" +
+            "\n${commitLogStr}"
+    println "updateDescription : ${updateDescription}"
+
+    println "*************** Upload Get Token ***************"
+    //组装cosToken需要的的参数，见https://www.pgyer.com/doc/view/api#fastUploadApp
+    List<KeyValue> cosTokenParams = new ArrayList<>()
+    //API KEY
+    cosTokenParams.add(new KeyValue("_api_key", apiKey))
+    //属于android平台
+    cosTokenParams.add(new KeyValue("buildType", "android"))
+    //更新描述
+    cosTokenParams.add(new KeyValue("buildUpdateDescription", updateDescription))
+    // 获取上传的 token ,见 https://www.pgyer.com/doc/view/api#fastUploadApp
+    HttpResponse<String> response = postFormData("https://www.pgyer.com/apiv2/app/getCOSToken", cosTokenParams)
+    def resp = new JsonSlurper().parseText(response.body())
+    println ">>>> Get Token Response :\n${response.body()}"
+
+    println "*************** Uploading Apk File ***************"
+    // 上传文件到第上一步获取的 URL，参数从上一步获取，这里需要解析参数
+    String paramsString = String.valueOf(resp.data.params)
+    String[] params = paramsString.substring(1, paramsString.length() - 1).split(',')
+    List<KeyValue> list = new ArrayList<>()
+    if (params != null) {
+        for (i in 0..<params.length) {
+            String rawParam = params[i].trim()
+            String parsedKey = rawParam.substring(0, rawParam.indexOf("="))
+            String parsedValue = rawParam.substring(rawParam.indexOf("=") + 1, rawParam.length())
+            //添加参数
+            list.add(new KeyValue(parsedKey, parsedValue))
+        }
+    }
+    // 添加apk文件
+    list.add(new KeyValue("file", apk.getPath(), true))
+    HttpResponse<String> uploadResponse = postFormData(resp.data.endpoint, list)
+    if (uploadResponse.statusCode() == 204) {
+        println(">>>> Upload Success ")
+    } else {
+        println(">>>> Upload Fail :" + uploadResponse.body())
+    }
+    println "*************** Upload Completed ***************"
+}
+
+static HttpResponse<String> postFormData(String url, List<KeyValue> list) {
+    long requestStartTime = System.nanoTime()
+    String boundary = "*********"
+    // Result request body
+    List<byte[]> byteArrays = new ArrayList<>()
+    // Separator with boundary
+    byte[] separator = ("--" + boundary + "\r\nContent-Disposition: form-data; name=").getBytes(StandardCharsets.UTF_8)
+    // Iterating over data parts
+    for (i in 0..<list.size()) {
+        // Opening boundary
+        byteArrays.add(separator)
+        def entry = list[i]
+        // If value is type of Path (file) append content type with file name and file binaries, otherwise simply append key=value
+        if (entry.isFile) {
+            java.nio.file.Path path = new File(entry.getValue()).toPath()
+            String mimeType = Files.probeContentType(path)
+            byteArrays.add(("\"" + entry.getKey() + "\"; filename=\"" + path.getFileName()
+                    + "\"\r\nContent-Type: " + mimeType + "\r\n\r\n").getBytes(StandardCharsets.UTF_8))
+            byteArrays.add(Files.readAllBytes(path))
+            byteArrays.add("\r\n".getBytes(StandardCharsets.UTF_8))
+        } else {
+            byteArrays.add(("\"" + entry.getKey() + "\"\r\n\r\n" + entry.getValue() + "\r\n")
+                    .getBytes(StandardCharsets.UTF_8))
+        }
+    }
+    byteArrays.add(("--" + boundary + "--").getBytes(StandardCharsets.UTF_8))
+    def publisher = HttpRequest.BodyPublishers.ofByteArrays(byteArrays)
+    HttpRequest httpRequest = HttpRequest
+            .newBuilder(URI.create(url))
+            .version(HttpClient.Version.HTTP_1_1)
+            .header("Content-Type", "multipart/form-data;boundary=" + boundary)
+            .POST(publisher)
+            .build()
+    return HttpClient.newHttpClient().send(httpRequest, HttpResponse.BodyHandlers.ofString())
+}
+
+/**
+ * 获取当天提交日志
+ * @return
+ */
+static String getGitCommitLogByToDay() {
+    //获取 git 提交日志
+    Calendar calendar = Calendar.getInstance()
+    String endTime = new SimpleDateFormat("yyyy-MM-dd").format(calendar.getTime())
+    calendar.add(Calendar.DATE, -1)
+    String startTime = new SimpleDateFormat("yyyy-MM-dd").format(calendar.getTime())
+    //git 命令
+    String gitCommand = "git log --pretty=\"%s\" --since=\"${startTime}\" --before=\"${endTime}\""
+    //println "getUpdateDescription() --> gitCommand = ${gitCommand}"
+    String description = gitCommand.execute().text.trim()
+    return description
+}
+
+/**
+ * 获取最近 n 条提交日志
+ */
+static String getGitCommitLogByCount(int count) {
+    //git 命令
+    String gitCommand = "git log -${count} --pretty=format:\"%s\""
+    //println "getUpdateDescription() --> gitCommand = ${gitCommand}"
+    String description = gitCommand.execute().text.trim()
+    return description
+}
+
+/**
+ * 获取分支名
+ */
+static String getBranchName() {
+    String gitCommand = "git rev-parse --abbrev-ref HEAD"
+    return gitCommand.execute().text.trim()
+}
+
+class KeyValue {
+    String key
+    String value
+    boolean isFile
+
+    KeyValue(String key, String value) {
+        this(key, value, false)
+    }
+
+    KeyValue(String key, String value, boolean isFile) {
+        this.key = key
+        this.value = value
+        this.isFile = isFile
+    }
+
+    @Override
+    String toString() {
+        return "{key:" + key + ", value:" + value + ", isFile:$isFile}"
+    }
+}
