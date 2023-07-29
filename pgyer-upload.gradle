@@ -41,15 +41,18 @@ def uploadApk(File apk, String flavorName) {
         buildFlavorName = "Dev"
     } else if (flavorName == "ProduceRelease") {
         buildFlavorName = "Produce"
-    }else  if (flavorName == "BetaRelease"){
+    } else if (flavorName == "BetaRelease") {
         buildFlavorName = "Beta"
     }
     println "flavorName = ${buildFlavorName}  apkName = ${apkName}  apkSize = ${apk.size()}"
     // Git 提交信息
     String commitLogStr = getGitCommitLogByCount(5)
 //    String commitLogStr = getGitCommitLogByToDay()
+    def appModule = project.rootProject.project(':app')
+    def appVersionName = appModule.android.defaultConfig.versionName
+    def appVersionCode = appModule.android.defaultConfig.versionCode
     //更新信息
-    String updateDescription = "\n[${getBranchName()}]：${buildFlavorName}-${rootProject.ext.app.versionName}-${rootProject.ext.app.versionCode}" +
+    String updateDescription = "\n[${getBranchName()}]：${buildFlavorName}-${appVersionName}-${appVersionCode}" +
             "\n${commitLogStr}"
     println "updateDescription : ${updateDescription}"
 
